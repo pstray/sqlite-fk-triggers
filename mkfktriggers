@@ -1,0 +1,509 @@
+#! /usr/bin/perl
+#
+#    $Id$
+#
+# Copyright (C) 2008 by Peder Stray <peder@ninja.no>
+#
+
+use strict;
+use Getopt::Long;
+use Text::Balanced qw(:ALL);
+use Data::Dumper;
+
+my $opt_strict = 0;
+
+GetOptions('strict!' => \$opt_strict,
+	  );
+
+my $data = do { local $/ = undef; <>; };
+
+# kill all comments
+$data =~ s,/\*[^*]*\*+([^/*][^*]*\*+)*/
+           |--[^\n]*
+	   |("(\\.|[^"\\])*"
+	       |'(\\.|[^'\\])*'
+	       |.[^/"'\\-]*),defined $2 ? $2 : "",gsex;
+
+my @tokens;
+my %tables;
+
+while ($data =~
+       /create\s+table(?:\s+if\s+not\s+exists)?\s+(\S+)\s*\((.*?)\)\s*;/imsg) {
+    my($table,$coldefs) = ($1, $2);
+    
+    my %tdata = (
+		 name => $table,
+		);
+
+    @tokens = extract_multiple($coldefs,
+			       [ sub { extract_bracketed($_[0], q{()}) },
+				 sub { extract_delimited($_[0], q{"'`}) },
+				 qr/[+-]?\w+/,
+				 qr/,/,
+			       ],
+			       undef, # split as much as we can
+			       1, # ignore anything else
+			      );
+
+    while (@tokens) {
+	my %data;
+	my @utok;
+
+	if (match('CONSTRAINT')) {
+	    $data{constraint} = token(",") or next;
+	}
+
+	if (match('UNIQUE')) {
+	    # UNIQUE ( column_name [, ... ] ) 
+	    next;
+	}
+	elsif (match('PRIMARY', 'KEY')) {
+	    # PRIMARY KEY ( column_name [, ... ] )
+	    if ($tokens[0] = /^\((.*)\)$/) {
+		my @cols = split ",", $1;
+		token();
+		for (@cols) {
+		    s/^\s+//;
+		    s/\s+$//;
+		}
+		if (@cols) {
+		    $tdata{pk}{name} = $data{constraint};
+		    $tdata{pk}{cols} = \@cols;
+		}
+	    }
+	    next;
+	}
+	elsif (match('CHECK')) {
+	    # CHECK ( expression )
+	    next;
+	}
+	elsif (match('FOREIGN', 'KEY')) {
+	    my %fk;
+	    # FOREIGN KEY ( column_name [, ... ] )
+
+	    if ($tokens[0] =~ /^\((.*)\)$/) {
+		$fk{srccols} = [ split ",", $1 ];
+		token();
+		for (@{$fk{src}}) {
+		    s/^\s+//;
+		    s/\s+$//;
+		}
+	    }
+	    else {
+		next;
+	    }
+
+	    # REFERENCES reftable [ ( refcolumn [, ... ] ) ]
+	    match('REFERENCES') or next;
+
+	    $fk{reftable} = token(",") or next;
+
+	    if ($tokens[0] =~ /^\((.*)\)$/) {
+		$fk{refcols} = [ split ",", $1 ];
+		token();
+		for (@{$fk{refcols}}) {
+		    s/^\s+//;
+		    s/\s+$//;
+		}
+	    }
+
+	    # [ MATCH FULL | MATCH PARTIAL | MATCH SIMPLE ]
+	    if (match('MATCH')) {
+		if (match('FULL')) {
+		    $fk{match} = 'full';
+		}
+		elsif (match('PARTIAL')) {
+		    $fk{match} = 'partial';
+		}
+		elsif (match('SIMPLE')) {
+		    $fk{match} = 'simple';
+		}
+		else {
+		    token(",");
+		}
+	    }
+
+	    $fk{on} = { delete => 'error', 
+		        update => 'error',
+		      };
+	    
+	    # [ ON DELETE action ] | [ ON UPDATE action ]
+	    while (match('ON')) {
+		my($method, $action);
+		
+		if (match('DELETE')) {
+		    $method = 'delete';
+		}
+		elsif (match('UPDATE')) {
+		    $method = 'update';
+		}
+		else {
+		    token(",") or next;
+		}
+
+		if (match('SET', 'NULL')) {
+		    $action = 'null';
+		}
+		elsif (match('SET', 'DEFAULT')) {
+		    $action = 'default';
+		}
+		elsif (match('CASCADE')) {
+		    $action = 'cascade';
+		}
+		elsif (match('RESTRICT')) {
+		    $action = 'error';
+		}
+		elsif (match('NO', 'ACTION')) {
+		    $action = 'error'; # as restrict, but deferable
+		}
+		else {
+		    token(",") or next;
+		}
+
+		$fk{on}{$method} = $action;
+	    }
+
+	    $fk{name} = $data{constraint} ||
+	      sprintf "fk_%s_%s", $table, join("_", @{$fk{srccols}});
+	    push @{$tdata{fk}}, \%fk;
+
+	    next;
+	}
+
+	my $name = token(",");
+	my %data;
+
+	$tdata{null}{$name} = 1;
+	
+	while (@tokens) {
+	    last if $tokens[0] eq ',';
+
+	    if (match('CONSTRAINT')) {
+		$data{constraint} = token(",");
+	    }
+	    elsif (match('DEFAULT')) {
+		$tdata{default}{$name} = token(",");
+	    }
+	    elsif (match('NULL')) {
+		$tdata{null}{$name} = 1;
+	    }
+	    elsif (match('NOT', 'NULL')) {
+		$tdata{null}{$name} = 0;
+	    }
+	    elsif (match('PRIMARY', 'KEY')) {
+		$tdata{pk}{name} = $data{constraint};
+		$tdata{pk}{cols} = [ $name ];
+		match('ASC') || match('DESC');
+		match('AUTOINCREMENT');
+	    }
+	    elsif (match('UNIQUE')) {
+		# skip
+	    }
+	    elsif (match('CHECK')) {
+		# just skip it...
+		token(",");
+	    }
+	    elsif (match('REFERENCES')) {
+		my %fk;
+
+		$fk{srccols} = [ $name ];
+
+		$fk{reftable} = token(",") or next;
+
+		if ($tokens[0] =~ /^\((.*)\)$/) {
+		    $fk{refcols} = [ split ",", $1 ];
+		    token();
+		    for (@{$fk{refcols}}) {
+			s/^\s+//;
+			s/\s+$//;
+		    }
+		}
+		
+		# [ MATCH FULL | MATCH PARTIAL | MATCH SIMPLE ]
+		if (match('MATCH')) {
+		    if (match('FULL')) {
+			$fk{match} = 'full';
+		    }
+		    elsif (match('PARTIAL')) {
+			$fk{match} = 'partial';
+		    }
+		    elsif (match('SIMPLE')) {
+			$fk{match} = 'simple';
+		    }
+		    else {
+			token(",");
+		    }
+		}
+
+		$fk{on} = { delete => 'error', 
+			    update => 'error',
+			  };
+		
+		# [ ON DELETE action ] | [ ON UPDATE action ]
+		while (match('ON')) {
+		    my($method, $action);
+		    
+		    if (match('DELETE')) {
+			$method = 'delete';
+		    }
+		    elsif (match('UPDATE')) {
+			$method = 'update';
+		    }
+		    else {
+			token(",") or next;
+		    }
+		    
+		    if (match('SET', 'NULL')) {
+			$action = 'null';
+		    }
+		    elsif (match('SET', 'DEFAULT')) {
+			$action = 'default';
+		    }
+		    elsif (match('CASCADE')) {
+			$action = 'cascade';
+		    }
+		    elsif (match('RESTRICT')) {
+			$action = 'error';
+		    }
+		    elsif (match('NO', 'ACTION')) {
+			$action = 'error'; # but deferable
+		    }
+		    else {
+			token(",") or next;
+		    }
+		    
+		    $fk{on}{$method} = $action;
+		}
+		
+		$fk{name} = $data{constraint} ||
+		  sprintf "fk_%s_%s", $table, $name;
+		push @{$tdata{fk}}, \%fk;
+
+	    }
+	    else {
+		push @utok, token(",");
+	    }
+
+	}
+	$tdata{type}{$name} = shift @utok;
+
+	#printf "%s  : %s %s", $table, $name, $tdata{type}{$name};
+	#printf " [%s]", $_ for @utok;
+	#printf "\n";
+
+    }
+    continue {
+	skipto(",");
+	match(",");
+    }
+
+    $tables{$table} = \%tdata;
+    
+}
+
+
+for my $table (sort keys %tables) {
+    my $def = $tables{$table};
+    next unless $def->{fk};
+#    printf Dumper $def;
+
+    printf "--\n-- TABLE %s\n--\n", $table;
+    #print Dumper $tables{$table};
+  FK:
+    for my $fk (@{$def->{fk}}) {
+	my $name = $fk->{name};
+	my $tname = sprintf "%s_%s", $table, join("_", @{$fk->{srccols}});
+
+	printf "\n-- FK %s.%s\n\n", $table, $name;
+
+	unless (exists $tables{$fk->{reftable}}) {
+	    error("unkown table `%s`", $fk->{reftable});
+	    next FK if $opt_strict;	    
+	}
+
+	if ($fk->{refcols}) {
+	    for my $col (@{$fk->{refcols}}) {
+		unless (exists $tables{$fk->{reftable}}{type}{$col}) {
+		    error("unknown column `%s`", $col);
+		    next FK if $opt_strict;
+		}
+	    }
+	}
+	else {
+	    $fk->{refcols} = $tables{$fk->{reftable}}{pk}{cols};
+	}
+
+	unless ($fk->{refcols}) {
+	    error("missing reference columns");
+	    next FK; # fatal
+	}
+
+	my $reftable = $fk->{reftable};
+	my @refcols  = qname(@{$fk->{refcols}});
+	my @srccols  = qname(@{$fk->{srccols}});
+
+	# on INSERT
+
+	printf qq{DROP TRIGGER IF EXISTS %s;\n}, qname("fki_$tname");
+	printf qq{CREATE TRIGGER %s\n}, qname("fki_$tname");
+	printf qq{BEFORE INSERT ON %s\n}, qname($table);
+	printf qq{FOR EACH ROW BEGIN\n};
+	printf qq{    SELECT RAISE(ROLLBACK, 'insert on table "%s" violates foreign key constraint "%s"')\n}, $table, $name;
+	printf qq{    WHERE %s\n},
+	  join(qq{\n      AND },
+	       map { "NEW.$_ IS NOT NULL" } @srccols,
+	      );
+	printf(qq{      AND (SELECT %s FROM %s WHERE %s) IS NULL;\n},
+	       join(", ", @refcols),
+	       qname($reftable),
+	       join(" AND ", 
+		    map { sprintf "%s = NEW.%s", $refcols[$_], $srccols[$_] }
+		    0..$#srccols
+		   )
+	      );
+	printf "END;\n\n";
+
+	# on UPDATE (forward)
+
+	printf qq{DROP TRIGGER IF EXISTS %s;\n}, qname("fkuf_$tname");
+	printf qq{CREATE TRIGGER %s\n}, qname("fkuf_$tname");
+	printf(qq{BEFORE UPDATE OF %s ON %s\n},
+	       join(", ", @srccols), qname($table),
+	      );
+	printf qq{FOR EACH ROW BEGIN\n};
+	printf qq{    SELECT RAISE(ROLLBACK, 'update on table "%s" violates foreign key constraint "%s"')\n}, $table, $name;
+	printf(qq{    WHERE %s\n},
+	       join(qq{\n      AND },
+		    map { "NEW.$_ IS NOT NULL" } @srccols,
+		   ),
+	      );
+	printf(qq{      AND (SELECT %s FROM %s WHERE %s) IS NULL;\n},
+	       join(", ", @refcols),
+	       qname($reftable),
+	       join(" AND ", 
+		    map { sprintf "%s = NEW.%s", $refcols[$_], $srccols[$_] }
+		    0..$#srccols
+		   )
+	      );
+	printf "END;\n\n";
+
+	# on UPDATE (reverse)
+
+	if ($fk->{on}{update} eq 'error') {
+	    printf qq{DROP TRIGGER IF EXISTS %s;\n}, qname("fkur_$tname");
+	    printf qq{CREATE TRIGGER %s\n}, qname("fkur_$tname");
+	    printf(qq{BEFORE UPDATE OF %s ON %s\n}, 
+		   join(", ", @refcols), qname($reftable),
+		  );
+	    printf qq{FOR EACH ROW BEGIN\n};
+	    printf qq{    SELECT RAISE(ROLLBACK, 'update on table "%s" violates foreign key constraint "%s"')\n}, $reftable, $name;
+	    printf(qq{    WHERE (SELECT %s FROM %s WHERE %s) IS NOT NULL;\n},
+		   join(", ", @srccols),
+		   qname($table),
+		   join(" AND ", 
+			map { sprintf "%s = OLD.%s", $srccols[$_], $refcols[$_] }
+		    0..$#srccols
+		   )
+	      );
+	    printf "END;\n\n";
+	}
+	elsif ($fk->{on}{update} eq 'cascade') {
+	    printf qq{DROP TRIGGER IF EXISTS %s;\n}, qname("fkur_$tname");
+	    printf qq{CREATE TRIGGER %s\n}, qname("fkur_$tname");
+	    printf(qq{AFTER UPDATE OF %s ON %s\n}, 
+		   join(", ", @refcols), qname($reftable),
+		  );
+	    printf qq{FOR EACH ROW BEGIN\n};
+	    printf(qq{    UPDATE %s SET %s WHERE %s;\n},
+		   qname($table),
+		   join(", ",
+			map { sprintf "%s = NEW.%s", $srccols[$_], $refcols[$_] }
+			0..$#srccols
+		       ),
+		   join(" AND ",
+			map { sprintf "%s = OLD.%s", $srccols[$_], $refcols[$_] }
+			0..$#srccols
+		       ),
+		  );
+	    printf "END;\n\n";
+	}
+	else {
+	    error("Unsupported ON UPDATE: %s", $fk->{on}{update});
+	}
+
+	# on DELETE
+
+	if ($fk->{on}{delete} eq 'error') {
+	    printf qq{DROP TRIGGER IF EXISTS %s;\n}, qname("fkd_$tname");
+	    printf qq{CREATE TRIGGER %s\n}, qname("fkd_$tname");
+	    printf qq{BEFORE DELETE ON %s\n}, qname($reftable);
+	    printf qq{FOR EACH ROW BEGIN\n};
+	    printf qq{    SELECT RAISE(ROLLBACK, 'delete on table "%s" violates foreign key constraint "%s"')\n}, $reftable, $name;
+	    printf(qq{    WHERE (SELECT %s FROM %s WHERE %s) IS NOT NULL;\n},
+		   join(", ", @srccols),
+		   qname($table),
+		   join(" AND ", 
+			map { sprintf "%s = OLD.%s", $srccols[$_], $refcols[$_] }
+		    0..$#srccols
+		   )
+	      );
+	    printf "END;\n\n";
+	}
+	elsif ($fk->{on}{delete} eq 'cascade') {
+	    printf qq{DROP TRIGGER IF EXISTS %s;\n}, qname("fkd_$tname");
+	    printf qq{CREATE TRIGGER %s\n}, qname("fkd_$tname");
+	    printf qq{BEFORE DELETE ON %s\n}, qname($reftable);
+	    printf qq{FOR EACH ROW BEGIN\n};
+	    printf(qq{    DELETE FROM %s WHERE %s;\n},
+		   qname($table),
+		   join(" AND ",
+			map { sprintf "%s = OLD.%s", $srccols[$_], $refcols[$_] }
+			0..$#srccols
+		       ),
+		  );
+	    printf "END;\n\n";
+	}
+	else {
+	    error("Unsupported ON DELETE: %s", $fk->{on}{update});
+	}
+
+    }
+}
+
+#print Dumper \%tables;
+
+exit 0;
+
+# ---- helpers
+
+sub error {
+    my($fmt,@args) = @_;
+    printf "-- error: $fmt.\n", @args;
+}
+
+sub qname {
+    my(@names) = @_;
+    for (@names) {
+	s/^`(.*)`$/$1/ or s/`/``/g;
+	$_ = "`$_`";
+    }
+    return wantarray ? @names : $names[0];
+}
+
+sub match {
+    for my $i (0..$#_) {
+	return unless uc $tokens[$i] eq uc $_[$i];
+    }
+    return splice @tokens, 0, scalar @_;
+}
+
+sub token {
+    for (@_) {
+	return if uc $tokens[0] eq uc;
+    }
+    return shift @tokens;
+}
+
+sub skipto {
+    shift @tokens while @tokens && uc $tokens[0] ne uc $_[0];
+}
