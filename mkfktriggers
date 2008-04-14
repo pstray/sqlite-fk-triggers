@@ -401,7 +401,8 @@ for my $table (sort keys %tables) {
 		   join(", ", @srccols),
 		   qname($table),
 		   join(" AND ", 
-			map { sprintf "%s = OLD.%s", $srccols[$_], $refcols[$_] }
+			map { sprintf "%s = OLD.%s",
+				$srccols[$_], $refcols[$_] }
 		    0..$#srccols
 		   )
 	      );
@@ -417,11 +418,48 @@ for my $table (sort keys %tables) {
 	    printf(qq{    UPDATE %s SET %s WHERE %s;\n},
 		   qname($table),
 		   join(", ",
-			map { sprintf "%s = NEW.%s", $srccols[$_], $refcols[$_] }
+			map { sprintf "%s = NEW.%s",
+				$srccols[$_], $refcols[$_] }
 			0..$#srccols
 		       ),
 		   join(" AND ",
-			map { sprintf "%s = OLD.%s", $srccols[$_], $refcols[$_] }
+			map { sprintf "%s = OLD.%s",
+				$srccols[$_], $refcols[$_] }
+			0..$#srccols
+		       ),
+		  );
+	    printf "END;\n\n";
+	}
+	elsif ($fk->{on}{update} eq 'null') {
+	    printf qq{DROP TRIGGER IF EXISTS %s;\n}, qname("fku_$tname");
+	    printf qq{CREATE TRIGGER %s\n}, qname("fku_$tname");
+	    printf qq{BEFORE UPDATE ON %s\n}, qname($reftable);
+	    printf qq{FOR EACH ROW BEGIN\n};
+	    printf(qq{    UPDATE %s SET %s WHERE %s;\n},
+		   qname($table),
+		   join(", ", map { sprintf "%s = NULL", $_ } @srccols ),
+		   join(" AND ",
+			map { sprintf "%s = OLD.%s",
+				$srccols[$_], $refcols[$_] }
+			0..$#srccols
+		       ),
+		  );
+	    printf "END;\n\n";
+	}
+	elsif ($fk->{on}{update} eq 'default') {
+	    printf qq{DROP TRIGGER IF EXISTS %s;\n}, qname("fku_$tname");
+	    printf qq{CREATE TRIGGER %s\n}, qname("fku_$tname");
+	    printf qq{BEFORE UPDATE ON %s\n}, qname($reftable);
+	    printf qq{FOR EACH ROW BEGIN\n};
+	    printf(qq{    UPDATE %s SET %s WHERE %s;\n},
+		   qname($table),
+		   join(", ", 
+			map { sprintf "%s = %s", $_, 
+				$fk->{default}{$_}||'NULL' } @srccols,
+		       ),
+		   join(" AND ",
+			map { sprintf "%s = OLD.%s", 
+				$srccols[$_], $refcols[$_] }
 			0..$#srccols
 		       ),
 		  );
@@ -443,7 +481,8 @@ for my $table (sort keys %tables) {
 		   join(", ", @srccols),
 		   qname($table),
 		   join(" AND ", 
-			map { sprintf "%s = OLD.%s", $srccols[$_], $refcols[$_] }
+			map { sprintf "%s = OLD.%s",
+				$srccols[$_], $refcols[$_] }
 		    0..$#srccols
 		   )
 	      );
@@ -457,16 +496,51 @@ for my $table (sort keys %tables) {
 	    printf(qq{    DELETE FROM %s WHERE %s;\n},
 		   qname($table),
 		   join(" AND ",
-			map { sprintf "%s = OLD.%s", $srccols[$_], $refcols[$_] }
+			map { sprintf "%s = OLD.%s",
+				$srccols[$_], $refcols[$_] }
+			0..$#srccols
+		       ),
+		  );
+	    printf "END;\n\n";
+	}
+	elsif ($fk->{on}{delete} eq 'null') {
+	    printf qq{DROP TRIGGER IF EXISTS %s;\n}, qname("fkd_$tname");
+	    printf qq{CREATE TRIGGER %s\n}, qname("fkd_$tname");
+	    printf qq{BEFORE DELETE ON %s\n}, qname($reftable);
+	    printf qq{FOR EACH ROW BEGIN\n};
+	    printf(qq{    UPDATE %s SET %s WHERE %s;\n},
+		   qname($table),
+		   join(", ", map { sprintf "%s = NULL", $_ } @srccols ),
+		   join(" AND ",
+			map { sprintf "%s = OLD.%s",
+				$srccols[$_], $refcols[$_] }
+			0..$#srccols
+		       ),
+		  );
+	    printf "END;\n\n";
+	}
+	elsif ($fk->{on}{delete} eq 'default') {
+	    printf qq{DROP TRIGGER IF EXISTS %s;\n}, qname("fkd_$tname");
+	    printf qq{CREATE TRIGGER %s\n}, qname("fkd_$tname");
+	    printf qq{BEFORE DELETE ON %s\n}, qname($reftable);
+	    printf qq{FOR EACH ROW BEGIN\n};
+	    printf(qq{    UPDATE %s SET %s WHERE %s;\n},
+		   qname($table),
+		   join(", ", 
+			map { sprintf "%s = %s", $_, 
+				$fk->{default}{$_}||'NULL' } @srccols,
+		       ),
+		   join(" AND ",
+			map { sprintf "%s = OLD.%s", 
+				$srccols[$_], $refcols[$_] }
 			0..$#srccols
 		       ),
 		  );
 	    printf "END;\n\n";
 	}
 	else {
-	    error("Unsupported ON DELETE: %s", $fk->{on}{update});
+	    error("Unsupported ON DELETE: %s", $fk->{on}{delete});
 	}
-
     }
 }
 
