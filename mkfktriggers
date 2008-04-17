@@ -44,7 +44,7 @@ while ($data =~
 			       undef, # split as much as we can
 			       1, # ignore anything else
 			      );
-
+    
     while (@tokens) {
 	my %data;
 	my @utok;
@@ -78,13 +78,13 @@ while ($data =~
 	    next;
 	}
 	elsif (match('FOREIGN', 'KEY')) {
-	    my %fk;
 	    # FOREIGN KEY ( column_name [, ... ] )
 
+	    my @srccols;
 	    if ($tokens[0] =~ /^\((.*)\)$/) {
-		$fk{srccols} = [ split ",", $1 ];
+		@srccols = split ",", $1;
 		token();
-		for (@{$fk{src}}) {
+		for (@srccols) {
 		    s/^\s+//;
 		    s/\s+$//;
 		}
@@ -96,76 +96,10 @@ while ($data =~
 	    # REFERENCES reftable [ ( refcolumn [, ... ] ) ]
 	    match('REFERENCES') or next;
 
-	    $fk{reftable} = token(",") or next;
+	    my $fk = parse_refdef($table, \@srccols, $data{constraint})
+	      or next;
 
-	    if ($tokens[0] =~ /^\((.*)\)$/) {
-		$fk{refcols} = [ split ",", $1 ];
-		token();
-		for (@{$fk{refcols}}) {
-		    s/^\s+//;
-		    s/\s+$//;
-		}
-	    }
-
-	    # [ MATCH FULL | MATCH PARTIAL | MATCH SIMPLE ]
-	    if (match('MATCH')) {
-		if (match('FULL')) {
-		    $fk{match} = 'full';
-		}
-		elsif (match('PARTIAL')) {
-		    $fk{match} = 'partial';
-		}
-		elsif (match('SIMPLE')) {
-		    $fk{match} = 'simple';
-		}
-		else {
-		    token(",");
-		}
-	    }
-
-	    $fk{on} = { delete => 'error', 
-		        update => 'error',
-		      };
-	    
-	    # [ ON DELETE action ] | [ ON UPDATE action ]
-	    while (match('ON')) {
-		my($method, $action);
-		
-		if (match('DELETE')) {
-		    $method = 'delete';
-		}
-		elsif (match('UPDATE')) {
-		    $method = 'update';
-		}
-		else {
-		    token(",") or next;
-		}
-
-		if (match('SET', 'NULL')) {
-		    $action = 'null';
-		}
-		elsif (match('SET', 'DEFAULT')) {
-		    $action = 'default';
-		}
-		elsif (match('CASCADE')) {
-		    $action = 'cascade';
-		}
-		elsif (match('RESTRICT')) {
-		    $action = 'error';
-		}
-		elsif (match('NO', 'ACTION')) {
-		    $action = 'error'; # as restrict, but deferable
-		}
-		else {
-		    token(",") or next;
-		}
-
-		$fk{on}{$method} = $action;
-	    }
-
-	    $fk{name} = $data{constraint} ||
-	      sprintf "fk_%s_%s", $table, join("_", @{$fk{srccols}});
-	    push @{$tdata{fk}}, \%fk;
+	    push @{$tdata{fk}}, $fk;
 
 	    next;
 	}
@@ -204,81 +138,10 @@ while ($data =~
 		token(",");
 	    }
 	    elsif (match('REFERENCES')) {
-		my %fk;
 
-		$fk{srccols} = [ $name ];
-
-		$fk{reftable} = token(",") or next;
-
-		if ($tokens[0] =~ /^\((.*)\)$/) {
-		    $fk{refcols} = [ split ",", $1 ];
-		    token();
-		    for (@{$fk{refcols}}) {
-			s/^\s+//;
-			s/\s+$//;
-		    }
-		}
-		
-		# [ MATCH FULL | MATCH PARTIAL | MATCH SIMPLE ]
-		if (match('MATCH')) {
-		    if (match('FULL')) {
-			$fk{match} = 'full';
-		    }
-		    elsif (match('PARTIAL')) {
-			$fk{match} = 'partial';
-		    }
-		    elsif (match('SIMPLE')) {
-			$fk{match} = 'simple';
-		    }
-		    else {
-			token(",");
-		    }
-		}
-
-		$fk{on} = { delete => 'error', 
-			    update => 'error',
-			  };
-		
-		# [ ON DELETE action ] | [ ON UPDATE action ]
-		while (match('ON')) {
-		    my($method, $action);
-		    
-		    if (match('DELETE')) {
-			$method = 'delete';
-		    }
-		    elsif (match('UPDATE')) {
-			$method = 'update';
-		    }
-		    else {
-			token(",") or next;
-		    }
-		    
-		    if (match('SET', 'NULL')) {
-			$action = 'null';
-		    }
-		    elsif (match('SET', 'DEFAULT')) {
-			$action = 'default';
-		    }
-		    elsif (match('CASCADE')) {
-			$action = 'cascade';
-		    }
-		    elsif (match('RESTRICT')) {
-			$action = 'error';
-		    }
-		    elsif (match('NO', 'ACTION')) {
-			$action = 'error'; # but deferable
-		    }
-		    else {
-			token(",") or next;
-		    }
-		    
-		    $fk{on}{$method} = $action;
-		}
-		
-		$fk{name} = $data{constraint} ||
-		  sprintf "fk_%s_%s", $table, $name;
-		push @{$tdata{fk}}, \%fk;
-
+		my $fk = parse_refdef($table, [ $name ], $data{constraint})
+		  or next;
+		push @{$tdata{fk}}, $fk;
 	    }
 	    else {
 		push @utok, token(",");
@@ -549,6 +412,84 @@ for my $table (sort keys %tables) {
 exit 0;
 
 # ---- helpers
+
+sub parse_refdef {
+    my($table, $srccols, $constraint) = @_;
+    my %fk;
+
+    $fk{reftable} = token(",") or return;
+    $fk{srccols} = $srccols;
+    
+    if ($tokens[0] =~ /^\((.*)\)$/) {
+	$fk{refcols} = [ split ",", $1 ];
+	token();
+	for (@{$fk{refcols}}) {
+	    s/^\s+//;
+	    s/\s+$//;
+	}
+    }
+    
+    # [ MATCH FULL | MATCH PARTIAL | MATCH SIMPLE ]
+    if (match('MATCH')) {
+	if (match('FULL')) {
+	    $fk{match} = 'full';
+	}
+	elsif (match('PARTIAL')) {
+	    $fk{match} = 'partial';
+	}
+	elsif (match('SIMPLE')) {
+	    $fk{match} = 'simple';
+	}
+	else {
+	    token(",");
+	}
+    }
+    
+    $fk{on} = { delete => 'error', 
+		update => 'error',
+	      };
+    
+    # [ ON DELETE action ] | [ ON UPDATE action ]
+    while (match('ON')) {
+	my($method, $action);
+	
+	if (match('DELETE')) {
+	    $method = 'delete';
+	}
+	elsif (match('UPDATE')) {
+	    $method = 'update';
+	}
+	else {
+	    token(",") or return;
+	}
+	
+	if (match('SET', 'NULL')) {
+	    $action = 'null';
+	}
+	elsif (match('SET', 'DEFAULT')) {
+	    $action = 'default';
+	}
+	elsif (match('CASCADE')) {
+	    $action = 'cascade';
+	}
+	elsif (match('RESTRICT')) {
+	    $action = 'error';
+	}
+	elsif (match('NO', 'ACTION')) {
+	    $action = 'error'; # as restrict, but deferable
+	}
+	else {
+	    token(",") or return;
+	}
+
+	$fk{on}{$method} = $action;
+    }
+    
+    $fk{name} = $constraint ||
+      sprintf "fk_%s_%s", $table, join("_", @{$fk{srccols}});
+    
+    return \%fk;
+}
 
 sub error {
     my($fmt,@args) = @_;
