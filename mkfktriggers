@@ -11,9 +11,15 @@ use Text::Balanced qw(:ALL);
 use Data::Dumper;
 
 my $opt_strict = 0;
+my $opt_prefix = '';
 
 GetOptions('strict!' => \$opt_strict,
+	   'prefix=s' => \$opt_prefix,
 	  );
+
+if ($opt_prefix) {
+    $opt_prefix =~ s/_*$/_/;
+}
 
 my $data = do { local $/ = undef; <>; };
 
@@ -208,7 +214,7 @@ for my $table (sort keys %tables) {
 	# on INSERT
 
 	printf qq{DROP TRIGGER IF EXISTS %s;\n}, qname("fki_$tname");
-	printf qq{CREATE TRIGGER %s\n}, qname("fki_$tname");
+	printf qq{CREATE TRIGGER %s\n}, qname("${opt_prefix}fki_$tname");
 	printf qq{BEFORE INSERT ON %s\n}, qname($table);
 	printf qq{FOR EACH ROW BEGIN\n};
 	printf qq{    SELECT RAISE(ROLLBACK, 'insert on table "%s" violates foreign key constraint "%s"')\n}, $table, $name;
@@ -229,7 +235,7 @@ for my $table (sort keys %tables) {
 	# on UPDATE (forward)
 
 	printf qq{DROP TRIGGER IF EXISTS %s;\n}, qname("fkuf_$tname");
-	printf qq{CREATE TRIGGER %s\n}, qname("fkuf_$tname");
+	printf qq{CREATE TRIGGER %s\n}, qname("${opt_prefix}fkuf_$tname");
 	printf(qq{BEFORE UPDATE OF %s ON %s\n},
 	       join(", ", @srccols), qname($table),
 	      );
@@ -254,7 +260,7 @@ for my $table (sort keys %tables) {
 
 	if ($fk->{on}{update} eq 'error') {
 	    printf qq{DROP TRIGGER IF EXISTS %s;\n}, qname("fkur_$tname");
-	    printf qq{CREATE TRIGGER %s\n}, qname("fkur_$tname");
+	    printf qq{CREATE TRIGGER %s\n}, qname("${opt_prefix}fkur_$tname");
 	    printf(qq{BEFORE UPDATE OF %s ON %s\n}, 
 		   join(", ", @refcols), qname($reftable),
 		  );
@@ -273,7 +279,7 @@ for my $table (sort keys %tables) {
 	}
 	elsif ($fk->{on}{update} eq 'cascade') {
 	    printf qq{DROP TRIGGER IF EXISTS %s;\n}, qname("fkur_$tname");
-	    printf qq{CREATE TRIGGER %s\n}, qname("fkur_$tname");
+	    printf qq{CREATE TRIGGER %s\n}, qname("${opt_prefix}fkur_$tname");
 	    printf(qq{AFTER UPDATE OF %s ON %s\n}, 
 		   join(", ", @refcols), qname($reftable),
 		  );
@@ -295,7 +301,7 @@ for my $table (sort keys %tables) {
 	}
 	elsif ($fk->{on}{update} eq 'null') {
 	    printf qq{DROP TRIGGER IF EXISTS %s;\n}, qname("fku_$tname");
-	    printf qq{CREATE TRIGGER %s\n}, qname("fku_$tname");
+	    printf qq{CREATE TRIGGER %s\n}, qname("${opt_prefix}fku_$tname");
 	    printf qq{BEFORE UPDATE ON %s\n}, qname($reftable);
 	    printf qq{FOR EACH ROW BEGIN\n};
 	    printf(qq{    UPDATE %s SET %s WHERE %s;\n},
@@ -311,7 +317,7 @@ for my $table (sort keys %tables) {
 	}
 	elsif ($fk->{on}{update} eq 'default') {
 	    printf qq{DROP TRIGGER IF EXISTS %s;\n}, qname("fku_$tname");
-	    printf qq{CREATE TRIGGER %s\n}, qname("fku_$tname");
+	    printf qq{CREATE TRIGGER %s\n}, qname("${opt_prefix}fku_$tname");
 	    printf qq{BEFORE UPDATE ON %s\n}, qname($reftable);
 	    printf qq{FOR EACH ROW BEGIN\n};
 	    printf(qq{    UPDATE %s SET %s WHERE %s;\n},
@@ -336,7 +342,7 @@ for my $table (sort keys %tables) {
 
 	if ($fk->{on}{delete} eq 'error') {
 	    printf qq{DROP TRIGGER IF EXISTS %s;\n}, qname("fkd_$tname");
-	    printf qq{CREATE TRIGGER %s\n}, qname("fkd_$tname");
+	    printf qq{CREATE TRIGGER %s\n}, qname("${opt_prefix}fkd_$tname");
 	    printf qq{BEFORE DELETE ON %s\n}, qname($reftable);
 	    printf qq{FOR EACH ROW BEGIN\n};
 	    printf qq{    SELECT RAISE(ROLLBACK, 'delete on table "%s" violates foreign key constraint "%s"')\n}, $reftable, $name;
@@ -353,7 +359,7 @@ for my $table (sort keys %tables) {
 	}
 	elsif ($fk->{on}{delete} eq 'cascade') {
 	    printf qq{DROP TRIGGER IF EXISTS %s;\n}, qname("fkd_$tname");
-	    printf qq{CREATE TRIGGER %s\n}, qname("fkd_$tname");
+	    printf qq{CREATE TRIGGER %s\n}, qname("${opt_prefix}fkd_$tname");
 	    printf qq{BEFORE DELETE ON %s\n}, qname($reftable);
 	    printf qq{FOR EACH ROW BEGIN\n};
 	    printf(qq{    DELETE FROM %s WHERE %s;\n},
@@ -368,7 +374,7 @@ for my $table (sort keys %tables) {
 	}
 	elsif ($fk->{on}{delete} eq 'null') {
 	    printf qq{DROP TRIGGER IF EXISTS %s;\n}, qname("fkd_$tname");
-	    printf qq{CREATE TRIGGER %s\n}, qname("fkd_$tname");
+	    printf qq{CREATE TRIGGER %s\n}, qname("${opt_prefix}fkd_$tname");
 	    printf qq{BEFORE DELETE ON %s\n}, qname($reftable);
 	    printf qq{FOR EACH ROW BEGIN\n};
 	    printf(qq{    UPDATE %s SET %s WHERE %s;\n},
@@ -384,7 +390,7 @@ for my $table (sort keys %tables) {
 	}
 	elsif ($fk->{on}{delete} eq 'default') {
 	    printf qq{DROP TRIGGER IF EXISTS %s;\n}, qname("fkd_$tname");
-	    printf qq{CREATE TRIGGER %s\n}, qname("fkd_$tname");
+	    printf qq{CREATE TRIGGER %s\n}, qname("${opt_prefix}fkd_$tname");
 	    printf qq{BEFORE DELETE ON %s\n}, qname($reftable);
 	    printf qq{FOR EACH ROW BEGIN\n};
 	    printf(qq{    UPDATE %s SET %s WHERE %s;\n},
