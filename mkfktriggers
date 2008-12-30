@@ -6,22 +6,124 @@
 #
 
 use strict;
-use Getopt::Long;
+use Pod::Usage;
+use Getopt::Long qw(:config bundling auto_version auto_help);
 use Text::Balanced qw(:ALL);
 use Data::Dumper;
 
-my $opt_strict = 0;
-my $opt_prefix = '';
+our($VERSION) = '$Revision$' =~ / (\d+) /;
 
-GetOptions('strict!' => \$opt_strict,
-	   'prefix=s' => \$opt_prefix,
-	  );
+=head1 NAME
+
+mkfktriggers - Generate triggers to enforce foreign keys for sqlite
+
+=head1 SYNOPSIS
+
+mkfktriggers [B<--strict>] [B<--prefix>=I<PREFIX>]
+[B<-o>E<nbsp>F<output>|B<--output>=F<output>] [F<input>E<nbsp>...]
+
+=head1 DESCRIPTION
+
+This script generates triggers for SQLite to enforce foreign key
+constraints defined in table definitions.  It makes triggers to check
+integrity, and it also handles cascading if specified in the foreign key
+definition.
+
+=head1 OPTIONS
+
+=over
+
+=cut
+
+my @options;
+
+# Strict checking of trigger definitions.
+my $opt_strict;
+push @options, 'strict!' => \$opt_strict;
+
+=item B<--strict>
+
+Do strick checking of foreign key definitions.  Raise an error if the
+definition of the target table and columns of a foreign key hasn't been
+seen.  This option can also be specified in the source SQL-file with the
+following comment:
+
+    --#strict
+
+=cut
+
+# Value to prefix all trigger names
+my $opt_prefix;
+push @options, 'prefix=s' => \$opt_prefix;
+
+=pod 
+
+=item B<--prefix> I<prefix>
+
+Specify a prefix for the name of the generated triggers.  This is
+usefull when you want to specify your own triggers too, and want control
+over when each trigger for the same operation is fired.  Typically
+triggers for the same operation are fired in alfanumeric ordering by the
+name of the trigger.  This option can also be specified in the source
+SQL-file in the following way:
+
+    --#prefix t50
+
+This will prefix all triggers with "t50_" so you can name your other
+triggers with either lower ot higher numbers in the prefix to get them
+to be run either before or after the generated triggers.  A trigger you
+want to run before an insert would probably need to be run before the
+generated trigger, so you should then name it "t40_foo".
+
+=cut
+
+# outpuf if not STDOUT
+my $opt_output;
+push @options, 'output|o=s' => \$opt_output;
+
+=item B<-o>, B<--output> F<file>
+
+Specify the output file of the generated SQL.  If not specified,
+standard output is used.
+
+=cut
+
+# parse commandline
+GetOptions(@options) or pod2usage();
+
+unless (@ARGV) {
+    pod2usage();
+}
+
+=back
+
+=cut
+
+# read in the whole SQL data
+my $data = do { local $/ = undef; <>; };
+
+# find any defaults in special comments
+while ($data =~ /^--#(\w+)(?:[ \t]+(.+))?[ \t]*$/mg) {
+    my($key,$val) = ($1,$2);
+    for ($val) {
+	s/\s+$//;
+	s/^\s+//;
+    }
+    if ($key eq 'prefix') {
+	$opt_prefix = $val unless defined $opt_prefix;
+    }
+    elsif ($key eq 'strict') {
+	$opt_strict = 1 unless defined $opt_strict;
+    }
+}
 
 if ($opt_prefix) {
     $opt_prefix =~ s/_*$/_/;
 }
 
-my $data = do { local $/ = undef; <>; };
+if ($opt_prefix =~ /\s/) {
+    die "prefix ($opt_prefix) is not a single word, it should be a valid SQL identifier\n";
+}
 
 # kill all comments
 $data =~ s,/\*[^*]*\*+([^/*][^*]*\*+)*/
@@ -170,20 +272,27 @@ while ($data =~
     
 }
 
+local *OUTPUT;
+if ($opt_output) {
+    open OUTPUT, ">", $opt_output
+      or die "Error opening '$opt_output': $!\n";
+}
+else {
+    *OUTPUT = *STDOUT;
+}
 
 for my $table (sort keys %tables) {
     my $def = $tables{$table};
     next unless $def->{fk};
-#    printf Dumper $def;
 
-    printf "--\n-- TABLE %s\n--\n", $table;
-    #print Dumper $tables{$table};
+    printf OUTPUT "--\n-- TABLE %s\n--\n", $table;
+
   FK:
     for my $fk (@{$def->{fk}}) {
 	my $name = $fk->{name};
 	my $tname = sprintf "%s_%s", $table, join("_", @{$fk->{srccols}});
 
-	printf "\n-- FK %s.%s\n\n", $table, $name;
+	printf OUTPUT "\n-- FK %s.%s\n\n", $table, $name;
 
 	unless (exists $tables{$fk->{reftable}}) {
 	    error("unkown table `%s`", $fk->{reftable});
@@ -213,16 +322,16 @@ for my $table (sort keys %tables) {
 
 	# on INSERT
 
-	printf qq{DROP TRIGGER IF EXISTS %s;\n}, qname("fki_$tname");
-	printf qq{CREATE TRIGGER %s\n}, qname("${opt_prefix}fki_$tname");
-	printf qq{BEFORE INSERT ON %s\n}, qname($table);
-	printf qq{FOR EACH ROW BEGIN\n};
-	printf qq{    SELECT RAISE(ROLLBACK, 'insert on table "%s" violates foreign key constraint "%s"')\n}, $table, $name;
-	printf qq{    WHERE %s\n},
+	printf OUTPUT qq{DROP TRIGGER IF EXISTS %s;\n}, qname("fki_$tname");
+	printf OUTPUT qq{CREATE TRIGGER %s\n}, qname("${opt_prefix}fki_$tname");
+	printf OUTPUT qq{BEFORE INSERT ON %s\n}, qname($table);
+	printf OUTPUT qq{FOR EACH ROW BEGIN\n};
+	printf OUTPUT qq{    SELECT RAISE(ROLLBACK, 'insert on table "%s" violates foreign key constraint "%s"')\n}, $table, $name;
+	printf OUTPUT qq{    WHERE %s\n},
 	  join(qq{\n      AND },
 	       map { "NEW.$_ IS NOT NULL" } @srccols,
 	      );
-	printf(qq{      AND (SELECT %s FROM %s WHERE %s) IS NULL;\n},
+	printf(OUTPUT qq{      AND (SELECT %s FROM %s WHERE %s) IS NULL;\n},
 	       join(", ", @refcols),
 	       qname($reftable),
 	       join(" AND ", 
@@ -230,23 +339,23 @@ for my $table (sort keys %tables) {
 		    0..$#srccols
 		   )
 	      );
-	printf "END;\n\n";
+	printf OUTPUT "END;\n\n";
 
 	# on UPDATE (forward)
 
-	printf qq{DROP TRIGGER IF EXISTS %s;\n}, qname("fkuf_$tname");
-	printf qq{CREATE TRIGGER %s\n}, qname("${opt_prefix}fkuf_$tname");
-	printf(qq{BEFORE UPDATE OF %s ON %s\n},
+	printf OUTPUT qq{DROP TRIGGER IF EXISTS %s;\n}, qname("fkuf_$tname");
+	printf OUTPUT qq{CREATE TRIGGER %s\n}, qname("${opt_prefix}fkuf_$tname");
+	printf(OUTPUT qq{BEFORE UPDATE OF %s ON %s\n},
 	       join(", ", @srccols), qname($table),
 	      );
-	printf qq{FOR EACH ROW BEGIN\n};
-	printf qq{    SELECT RAISE(ROLLBACK, 'update on table "%s" violates foreign key constraint "%s"')\n}, $table, $name;
-	printf(qq{    WHERE %s\n},
+	printf OUTPUT qq{FOR EACH ROW BEGIN\n};
+	printf OUTPUT qq{    SELECT RAISE(ROLLBACK, 'update on table "%s" violates foreign key constraint "%s"')\n}, $table, $name;
+	printf(OUTPUT qq{    WHERE %s\n},
 	       join(qq{\n      AND },
 		    map { "NEW.$_ IS NOT NULL" } @srccols,
 		   ),
 	      );
-	printf(qq{      AND (SELECT %s FROM %s WHERE %s) IS NULL;\n},
+	printf(OUTPUT qq{      AND (SELECT %s FROM %s WHERE %s) IS NULL;\n},
 	       join(", ", @refcols),
 	       qname($reftable),
 	       join(" AND ", 
@@ -254,19 +363,19 @@ for my $table (sort keys %tables) {
 		    0..$#srccols
 		   )
 	      );
-	printf "END;\n\n";
+	printf OUTPUT "END;\n\n";
 
 	# on UPDATE (reverse)
 
 	if ($fk->{on}{update} eq 'error') {
-	    printf qq{DROP TRIGGER IF EXISTS %s;\n}, qname("fkur_$tname");
-	    printf qq{CREATE TRIGGER %s\n}, qname("${opt_prefix}fkur_$tname");
-	    printf(qq{BEFORE UPDATE OF %s ON %s\n}, 
+	    printf OUTPUT qq{DROP TRIGGER IF EXISTS %s;\n}, qname("fkur_$tname");
+	    printf OUTPUT qq{CREATE TRIGGER %s\n}, qname("${opt_prefix}fkur_$tname");
+	    printf(OUTPUT qq{BEFORE UPDATE OF %s ON %s\n}, 
 		   join(", ", @refcols), qname($reftable),
 		  );
-	    printf qq{FOR EACH ROW BEGIN\n};
-	    printf qq{    SELECT RAISE(ROLLBACK, 'update on table "%s" violates foreign key constraint "%s"')\n}, $reftable, $name;
-	    printf(qq{    WHERE (SELECT %s FROM %s WHERE %s) IS NOT NULL;\n},
+	    printf OUTPUT qq{FOR EACH ROW BEGIN\n};
+	    printf OUTPUT qq{    SELECT RAISE(ROLLBACK, 'update on table "%s" violates foreign key constraint "%s"')\n}, $reftable, $name;
+	    printf(OUTPUT qq{    WHERE (SELECT %s FROM %s WHERE %s) IS NOT NULL;\n},
 		   join(", ", @srccols),
 		   qname($table),
 		   join(" AND ", 
@@ -275,16 +384,16 @@ for my $table (sort keys %tables) {
 		    0..$#srccols
 		   )
 	      );
-	    printf "END;\n\n";
+	    printf OUTPUT "END;\n\n";
 	}
 	elsif ($fk->{on}{update} eq 'cascade') {
-	    printf qq{DROP TRIGGER IF EXISTS %s;\n}, qname("fkur_$tname");
-	    printf qq{CREATE TRIGGER %s\n}, qname("${opt_prefix}fkur_$tname");
-	    printf(qq{AFTER UPDATE OF %s ON %s\n}, 
+	    printf OUTPUT qq{DROP TRIGGER IF EXISTS %s;\n}, qname("fkur_$tname");
+	    printf OUTPUT qq{CREATE TRIGGER %s\n}, qname("${opt_prefix}fkur_$tname");
+	    printf(OUTPUT qq{AFTER UPDATE OF %s ON %s\n}, 
 		   join(", ", @refcols), qname($reftable),
 		  );
-	    printf qq{FOR EACH ROW BEGIN\n};
-	    printf(qq{    UPDATE %s SET %s WHERE %s;\n},
+	    printf OUTPUT qq{FOR EACH ROW BEGIN\n};
+	    printf(OUTPUT qq{    UPDATE %s SET %s WHERE %s;\n},
 		   qname($table),
 		   join(", ",
 			map { sprintf "%s = NEW.%s",
@@ -297,14 +406,14 @@ for my $table (sort keys %tables) {
 			0..$#srccols
 		       ),
 		  );
-	    printf "END;\n\n";
+	    printf OUTPUT "END;\n\n";
 	}
 	elsif ($fk->{on}{update} eq 'null') {
-	    printf qq{DROP TRIGGER IF EXISTS %s;\n}, qname("fku_$tname");
-	    printf qq{CREATE TRIGGER %s\n}, qname("${opt_prefix}fku_$tname");
-	    printf qq{BEFORE UPDATE ON %s\n}, qname($reftable);
-	    printf qq{FOR EACH ROW BEGIN\n};
-	    printf(qq{    UPDATE %s SET %s WHERE %s;\n},
+	    printf OUTPUT qq{DROP TRIGGER IF EXISTS %s;\n}, qname("fku_$tname");
+	    printf OUTPUT qq{CREATE TRIGGER %s\n}, qname("${opt_prefix}fku_$tname");
+	    printf OUTPUT qq{BEFORE UPDATE ON %s\n}, qname($reftable);
+	    printf OUTPUT qq{FOR EACH ROW BEGIN\n};
+	    printf(OUTPUT qq{    UPDATE %s SET %s WHERE %s;\n},
 		   qname($table),
 		   join(", ", map { sprintf "%s = NULL", $_ } @srccols ),
 		   join(" AND ",
@@ -313,14 +422,14 @@ for my $table (sort keys %tables) {
 			0..$#srccols
 		       ),
 		  );
-	    printf "END;\n\n";
+	    printf OUTPUT "END;\n\n";
 	}
 	elsif ($fk->{on}{update} eq 'default') {
-	    printf qq{DROP TRIGGER IF EXISTS %s;\n}, qname("fku_$tname");
-	    printf qq{CREATE TRIGGER %s\n}, qname("${opt_prefix}fku_$tname");
-	    printf qq{BEFORE UPDATE ON %s\n}, qname($reftable);
-	    printf qq{FOR EACH ROW BEGIN\n};
-	    printf(qq{    UPDATE %s SET %s WHERE %s;\n},
+	    printf OUTPUT qq{DROP TRIGGER IF EXISTS %s;\n}, qname("fku_$tname");
+	    printf OUTPUT qq{CREATE TRIGGER %s\n}, qname("${opt_prefix}fku_$tname");
+	    printf OUTPUT qq{BEFORE UPDATE ON %s\n}, qname($reftable);
+	    printf OUTPUT qq{FOR EACH ROW BEGIN\n};
+	    printf(OUTPUT qq{    UPDATE %s SET %s WHERE %s;\n},
 		   qname($table),
 		   join(", ", 
 			map { sprintf "%s = %s", $_, 
@@ -332,7 +441,7 @@ for my $table (sort keys %tables) {
 			0..$#srccols
 		       ),
 		  );
-	    printf "END;\n\n";
+	    printf OUTPUT "END;\n\n";
 	}
 	else {
 	    error("Unsupported ON UPDATE: %s", $fk->{on}{update});
@@ -341,12 +450,12 @@ for my $table (sort keys %tables) {
 	# on DELETE
 
 	if ($fk->{on}{delete} eq 'error') {
-	    printf qq{DROP TRIGGER IF EXISTS %s;\n}, qname("fkd_$tname");
-	    printf qq{CREATE TRIGGER %s\n}, qname("${opt_prefix}fkd_$tname");
-	    printf qq{BEFORE DELETE ON %s\n}, qname($reftable);
-	    printf qq{FOR EACH ROW BEGIN\n};
-	    printf qq{    SELECT RAISE(ROLLBACK, 'delete on table "%s" violates foreign key constraint "%s"')\n}, $reftable, $name;
-	    printf(qq{    WHERE (SELECT %s FROM %s WHERE %s) IS NOT NULL;\n},
+	    printf OUTPUT qq{DROP TRIGGER IF EXISTS %s;\n}, qname("fkd_$tname");
+	    printf OUTPUT qq{CREATE TRIGGER %s\n}, qname("${opt_prefix}fkd_$tname");
+	    printf OUTPUT qq{BEFORE DELETE ON %s\n}, qname($reftable);
+	    printf OUTPUT qq{FOR EACH ROW BEGIN\n};
+	    printf OUTPUT qq{    SELECT RAISE(ROLLBACK, 'delete on table "%s" violates foreign key constraint "%s"')\n}, $reftable, $name;
+	    printf(OUTPUT qq{    WHERE (SELECT %s FROM %s WHERE %s) IS NOT NULL;\n},
 		   join(", ", @srccols),
 		   qname($table),
 		   join(" AND ", 
@@ -355,14 +464,14 @@ for my $table (sort keys %tables) {
 		    0..$#srccols
 		   )
 	      );
-	    printf "END;\n\n";
+	    printf OUTPUT "END;\n\n";
 	}
 	elsif ($fk->{on}{delete} eq 'cascade') {
-	    printf qq{DROP TRIGGER IF EXISTS %s;\n}, qname("fkd_$tname");
-	    printf qq{CREATE TRIGGER %s\n}, qname("${opt_prefix}fkd_$tname");
-	    printf qq{BEFORE DELETE ON %s\n}, qname($reftable);
-	    printf qq{FOR EACH ROW BEGIN\n};
-	    printf(qq{    DELETE FROM %s WHERE %s;\n},
+	    printf OUTPUT qq{DROP TRIGGER IF EXISTS %s;\n}, qname("fkd_$tname");
+	    printf OUTPUT qq{CREATE TRIGGER %s\n}, qname("${opt_prefix}fkd_$tname");
+	    printf OUTPUT qq{BEFORE DELETE ON %s\n}, qname($reftable);
+	    printf OUTPUT qq{FOR EACH ROW BEGIN\n};
+	    printf(OUTPUT qq{    DELETE FROM %s WHERE %s;\n},
 		   qname($table),
 		   join(" AND ",
 			map { sprintf "%s = OLD.%s",
@@ -370,14 +479,14 @@ for my $table (sort keys %tables) {
 			0..$#srccols
 		       ),
 		  );
-	    printf "END;\n\n";
+	    printf OUTPUT "END;\n\n";
 	}
 	elsif ($fk->{on}{delete} eq 'null') {
-	    printf qq{DROP TRIGGER IF EXISTS %s;\n}, qname("fkd_$tname");
-	    printf qq{CREATE TRIGGER %s\n}, qname("${opt_prefix}fkd_$tname");
-	    printf qq{BEFORE DELETE ON %s\n}, qname($reftable);
-	    printf qq{FOR EACH ROW BEGIN\n};
-	    printf(qq{    UPDATE %s SET %s WHERE %s;\n},
+	    printf OUTPUT qq{DROP TRIGGER IF EXISTS %s;\n}, qname("fkd_$tname");
+	    printf OUTPUT qq{CREATE TRIGGER %s\n}, qname("${opt_prefix}fkd_$tname");
+	    printf OUTPUT qq{BEFORE DELETE ON %s\n}, qname($reftable);
+	    printf OUTPUT qq{FOR EACH ROW BEGIN\n};
+	    printf(OUTPUT qq{    UPDATE %s SET %s WHERE %s;\n},
 		   qname($table),
 		   join(", ", map { sprintf "%s = NULL", $_ } @srccols ),
 		   join(" AND ",
@@ -386,14 +495,14 @@ for my $table (sort keys %tables) {
 			0..$#srccols
 		       ),
 		  );
-	    printf "END;\n\n";
+	    printf OUTPUT "END;\n\n";
 	}
 	elsif ($fk->{on}{delete} eq 'default') {
-	    printf qq{DROP TRIGGER IF EXISTS %s;\n}, qname("fkd_$tname");
-	    printf qq{CREATE TRIGGER %s\n}, qname("${opt_prefix}fkd_$tname");
-	    printf qq{BEFORE DELETE ON %s\n}, qname($reftable);
-	    printf qq{FOR EACH ROW BEGIN\n};
-	    printf(qq{    UPDATE %s SET %s WHERE %s;\n},
+	    printf OUTPUT qq{DROP TRIGGER IF EXISTS %s;\n}, qname("fkd_$tname");
+	    printf OUTPUT qq{CREATE TRIGGER %s\n}, qname("${opt_prefix}fkd_$tname");
+	    printf OUTPUT qq{BEFORE DELETE ON %s\n}, qname($reftable);
+	    printf OUTPUT qq{FOR EACH ROW BEGIN\n};
+	    printf(OUTPUT qq{    UPDATE %s SET %s WHERE %s;\n},
 		   qname($table),
 		   join(", ", 
 			map { sprintf "%s = %s", $_, 
@@ -405,7 +514,7 @@ for my $table (sort keys %tables) {
 			0..$#srccols
 		       ),
 		  );
-	    printf "END;\n\n";
+	    printf OUTPUT "END;\n\n";
 	}
 	else {
 	    error("Unsupported ON DELETE: %s", $fk->{on}{delete});
@@ -528,3 +637,18 @@ sub token {
 sub skipto {
     shift @tokens while @tokens && uc $tokens[0] ne uc $_[0];
 }
+
+__END__
+
+=head1 AUTHOR
+
+Written by Peder Stray <peder.stray@gmail.com>
+
+=head1 COPYRIGHT
+
+Copyright E<169> 2008-2009 by Peder Stray <peder.stray@gmail.com>
+
+Release under GPLv2 L<http://gnu.org/licenses/gpl.html> and distributed
+from L<http://code.google.com/p/sqlite-fk-triggers/>
+
+=cut
